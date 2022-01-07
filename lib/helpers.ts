@@ -1,5 +1,12 @@
 import PairSession from 'homey/lib/PairSession';
 import { ClientError } from 'graphql-request/dist/types';
+import ManagerFlow from 'homey/manager/flow';
+import {
+  FlowCard,
+  FlowCardAction,
+  FlowCardCondition,
+  FlowCardTriggerDevice,
+} from 'homey';
 import { Home, Logger, TibberApi } from './tibber';
 import { noticeError, startTransaction } from './newrelic-transaction';
 
@@ -54,4 +61,37 @@ const sortByName = (a: { name: string }, b: { name: string }): number => {
   if (a.name < b.name) return -1;
   if (a.name > b.name) return 1;
   return 0;
+};
+
+export const triggerCard = (
+  homeyFlow: ManagerFlow,
+  name: string,
+  runListener?: FlowCard.RunCallback,
+): FlowCardTriggerDevice => {
+  const card = homeyFlow.getDeviceTriggerCard(name);
+  if (runListener === undefined) return card;
+  card.registerRunListener(runListener);
+  return card;
+};
+
+export const conditionCard = (
+  homeyFlow: ManagerFlow,
+  name: string,
+  runListener?: FlowCard.RunCallback,
+): FlowCardCondition => {
+  const card = homeyFlow.getConditionCard(name);
+  if (runListener === undefined) return card;
+  card.registerRunListener(runListener);
+  return card;
+};
+
+export const actionCard = (
+  homeyFlow: ManagerFlow,
+  name: string,
+  runListener?: FlowCard.RunCallback,
+): FlowCardAction => {
+  const card = homeyFlow.getActionCard(name);
+  if (runListener === undefined) return card;
+  card.registerRunListener(runListener);
+  return card;
 };

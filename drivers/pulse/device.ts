@@ -1,4 +1,4 @@
-import { Device, FlowCardTriggerDevice } from 'homey';
+import { Device, FlowCard, FlowCardTriggerDevice } from 'homey';
 import _ from 'lodash';
 import moment from 'moment-timezone';
 import http from 'http.min';
@@ -6,6 +6,7 @@ import { Subscription } from 'apollo-client/util/Observable';
 import { LiveMeasurement, TibberApi } from '../../lib/tibber';
 import { NordPoolPriceResult } from '../../lib/types';
 import { startTransaction } from '../../lib/newrelic-transaction';
+import { triggerCard } from '../../lib/helpers';
 
 class PulseDevice extends Device {
   #tibber!: TibberApi;
@@ -24,13 +25,17 @@ class PulseDevice extends Device {
   #prevCost?: number;
   #wsSubscription!: Subscription;
   #resubscribeDebounce!: _.DebouncedFunc<() => void>;
-  #powerChangedTrigger!: FlowCardTriggerDevice;
-  #consumptionChangedTrigger!: FlowCardTriggerDevice;
-  #costChangedTrigger!: FlowCardTriggerDevice;
-  #currentL1ChangedTrigger!: FlowCardTriggerDevice;
-  #currentL2ChangedTrigger!: FlowCardTriggerDevice;
-  #currentL3ChangedTrigger!: FlowCardTriggerDevice;
-  #dailyConsumptionReportTrigger!: FlowCardTriggerDevice;
+  #triggers!: {
+    powerChanged: FlowCardTriggerDevice;
+    consumptionChanged: FlowCardTriggerDevice;
+    costChanged: FlowCardTriggerDevice;
+    currentChanged: {
+      L1: FlowCardTriggerDevice;
+      L2: FlowCardTriggerDevice;
+      L3: FlowCardTriggerDevice;
+    };
+    dailyConsumptionReport: FlowCardTriggerDevice;
+  };
 
   async onInit() {
     const { id, t: token } = this.getData();
@@ -39,28 +44,17 @@ class PulseDevice extends Device {
     this.#deviceId = id;
     this.#throttle = this.getSetting('pulse_throttle') || 30;
 
-    this.#powerChangedTrigger =
-      this.homey.flow.getDeviceTriggerCard('power_changed');
-
-    this.#consumptionChangedTrigger = this.homey.flow.getDeviceTriggerCard(
-      'consumption_changed',
-    );
-
-    this.#costChangedTrigger =
-      this.homey.flow.getDeviceTriggerCard('cost_changed');
-
-    this.#currentL1ChangedTrigger =
-      this.homey.flow.getDeviceTriggerCard('current.L1_changed');
-
-    this.#currentL2ChangedTrigger =
-      this.homey.flow.getDeviceTriggerCard('current.L2_changed');
-
-    this.#currentL3ChangedTrigger =
-      this.homey.flow.getDeviceTriggerCard('current.L3_changed');
-
-    this.#dailyConsumptionReportTrigger = this.homey.flow.getDeviceTriggerCard(
-      'daily_consumption_report',
-    );
+    this.#triggers = {
+      powerChanged: this.#trigger('power_changed'),
+      consumptionChanged: this.#trigger('consumption_changed'),
+      costChanged: this.#trigger('cost_changed'),
+      currentChanged: {
+        L1: this.#trigger('current.L1_changed'),
+        L2: this.#trigger('current.L2_changed'),
+        L3: this.#trigger('current.L3_changed'),
+      },
+      dailyConsumptionReport: this.#trigger('daily_consumption_report'),
+    };
 
     this.log(
       `Tibber pulse device ${this.getName()} has been initialized (throttle: ${
@@ -146,7 +140,7 @@ class PulseDevice extends Device {
         if (measurePower !== this.#prevPower) {
           this.#prevPower = measurePower;
           this.log(`Trigger power changed`, measurePower);
-          this.#powerChangedTrigger
+          this.#triggers.powerChanged
             .trigger(this, { power: measurePower })
             .catch(console.error);
         }
@@ -168,9 +162,9 @@ class PulseDevice extends Device {
           if (currentL1 !== this.#prevCurrentL1) {
             this.#prevCurrentL1 = currentL1!;
             this.log(`Trigger current L1 changed`, currentL1);
-            this.#currentL1ChangedTrigger
-              .trigger(this, { currentL1 })
-              .catch(console.error);
+            this.#triggers.currentChanged.L1.trigger(this, { currentL1 }).catch(
+              console.error,
+            );
           }
         });
     }
@@ -183,9 +177,9 @@ class PulseDevice extends Device {
           if (currentL2 !== this.#prevCurrentL2) {
             this.#prevCurrentL2 = currentL2!;
             this.log(`Trigger current L2 changed`, currentL2);
-            this.#currentL2ChangedTrigger
-              .trigger(this, { currentL2 })
-              .catch(console.error);
+            this.#triggers.currentChanged.L2.trigger(this, { currentL2 }).catch(
+              console.error,
+            );
           }
         });
     }
@@ -198,9 +192,9 @@ class PulseDevice extends Device {
           if (currentL3 !== this.#prevCurrentL3) {
             this.#prevCurrentL3 = currentL3!;
             this.log(`Trigger current L3 changed`, currentL3);
-            this.#currentL3ChangedTrigger
-              .trigger(this, { currentL3 })
-              .catch(console.error);
+            this.#triggers.currentChanged.L3.trigger(this, { currentL3 }).catch(
+              console.error,
+            );
           }
         });
     }
@@ -212,7 +206,7 @@ class PulseDevice extends Device {
         if (fixedConsumption < this.#prevConsumption!) {
           // Consumption has been reset
           this.log('Triggering daily consumption report');
-          this.#dailyConsumptionReportTrigger
+          this.#triggers.dailyConsumptionReport
             .trigger(this, {
               consumption: this.#prevConsumption,
               cost: this.#prevCost,
@@ -224,7 +218,7 @@ class PulseDevice extends Device {
         this.setCapabilityValue('meter_power', fixedConsumption).catch(
           console.error,
         );
-        this.#consumptionChangedTrigger
+        this.#triggers.consumptionChanged
           .trigger(this, { consumption: fixedConsumption })
           .catch(console.error);
       }
@@ -299,7 +293,7 @@ class PulseDevice extends Device {
       this.setCapabilityValue('accumulatedCost', fixedCost)
         .catch(console.error)
         .finally(() => {
-          this.#costChangedTrigger
+          this.#triggers.costChanged
             .trigger(this, { cost: fixedCost })
             .catch(console.error);
         });
@@ -319,6 +313,13 @@ class PulseDevice extends Device {
         this.log('Error unsubscribing from previous connection', e);
       }
     }
+  }
+
+  #trigger(
+    name: string,
+    runListener?: FlowCard.RunCallback,
+  ): FlowCardTriggerDevice {
+    return triggerCard(this.homey.flow, name, runListener);
   }
 }
 
