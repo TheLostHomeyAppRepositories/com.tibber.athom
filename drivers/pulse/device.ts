@@ -3,7 +3,11 @@ import _ from 'lodash';
 import moment from 'moment-timezone';
 import http from 'http.min';
 import { Subscription } from 'apollo-client/util/Observable';
-import { LiveMeasurement, TibberApi } from '../../lib/tibber';
+import {
+  LiveMeasurement,
+  LiveMeasurementResponse,
+  TibberApi,
+} from '../../lib/tibber';
 import { NordPoolPriceResult } from '../../lib/types';
 import { startTransaction } from '../../lib/newrelic-transaction';
 import { triggerCard } from '../../lib/helpers';
@@ -18,10 +22,16 @@ class PulseDevice extends Device {
   #prevPowerProduction?: number;
   #prevUpdate?: moment.Moment;
   #prevPower?: number;
-  #prevCurrentL1?: number;
-  #prevCurrentL2?: number;
-  #prevCurrentL3?: number;
-  #prevConsumption?: number;
+  #prevCurrent: {
+    L1: number | null;
+    L2: number | null;
+    L3: number | null;
+  } = {
+    L1: null,
+    L2: null,
+    L3: null,
+  };
+  #prevConsumption!: number;
   #prevCost?: number;
   #wsSubscription!: Subscription;
   #resubscribeDebounce!: _.DebouncedFunc<() => void>;
@@ -116,12 +126,8 @@ class PulseDevice extends Device {
     );
   }
 
-  async subscribeCallback(result: LiveMeasurement) {
+  async subscribeCallback(result: LiveMeasurementResponse) {
     this.#resubscribeDebounce();
-
-    const power = result.data?.liveMeasurement?.power;
-    const powerProduction = result.data?.liveMeasurement?.powerProduction;
-    if (powerProduction) this.#prevPowerProduction = powerProduction;
 
     if (
       this.#prevUpdate &&
@@ -131,10 +137,37 @@ class PulseDevice extends Device {
 
     this.#prevUpdate = moment();
 
+    const currentL1 = result.data?.liveMeasurement?.currentL1;
+    const currentL2 = result.data?.liveMeasurement?.currentL2;
+    const currentL3 = result.data?.liveMeasurement?.currentL3;
+
+    this.log(
+      `Latest current values [L1: ${currentL1}, L2: ${currentL2}, L3: ${currentL3}]`,
+    );
+
+    await Promise.all([
+      this.#handlePower(result.data?.liveMeasurement),
+      this.#handleCurrent(result.data?.liveMeasurement, 'L1'),
+      this.#handleCurrent(result.data?.liveMeasurement, 'L2'),
+      this.#handleCurrent(result.data?.liveMeasurement, 'L3'),
+      this.#handleConsumption(result.data?.liveMeasurement),
+      this.#handleCost(result.data?.liveMeasurement),
+    ]);
+  }
+
+  async #handlePower(
+    liveMeasurement: LiveMeasurement | undefined,
+  ): Promise<void> {
+    const power = liveMeasurement?.power;
+    const powerProduction = liveMeasurement?.powerProduction;
+
+    if (powerProduction) this.#prevPowerProduction = powerProduction;
+
     const measurePower =
       power || -powerProduction! || -this.#prevPowerProduction!;
+
     this.log(`Set 'measure_power' capability to`, measurePower);
-    this.setCapabilityValue('measure_power', measurePower)
+    await this.setCapabilityValue('measure_power', measurePower)
       .catch(console.error)
       .finally(() => {
         if (measurePower !== this.#prevPower) {
@@ -145,86 +178,72 @@ class PulseDevice extends Device {
             .catch(console.error);
         }
       });
+  }
 
-    const currentL1 = result.data?.liveMeasurement?.currentL1;
-    const currentL2 = result.data?.liveMeasurement?.currentL2;
-    const currentL3 = result.data?.liveMeasurement?.currentL3;
+  async #handleCurrent(
+    liveMeasurement: LiveMeasurement | undefined,
+    phase: `L${1 | 2 | 3}`,
+  ): Promise<void> {
+    const current = liveMeasurement?.[`current${phase}`];
+    if (current === undefined || current === null) return;
 
-    this.log(
-      `Latest current values [L1: ${currentL1}, L2: ${currentL2}, L3: ${currentL3}]`,
-    );
-
-    if (currentL1 !== undefined && currentL1 !== null) {
-      this.setCapabilityValue('measure_current.L1', currentL1)
-        .catch(console.error)
-        .finally(() => {
-          this.log("Set 'measure_current.L1' capability to", currentL1);
-          if (currentL1 !== this.#prevCurrentL1) {
-            this.#prevCurrentL1 = currentL1!;
-            this.log(`Trigger current L1 changed`, currentL1);
-            this.#triggers.currentChanged.L1.trigger(this, { currentL1 }).catch(
-              console.error,
-            );
-          }
-        });
-    }
-
-    if (currentL2 !== undefined && currentL2 !== null) {
-      this.setCapabilityValue('measure_current.L2', currentL2)
-        .catch(console.error)
-        .finally(() => {
-          this.log("Set 'measure_current.L2' capability to", currentL2);
-          if (currentL2 !== this.#prevCurrentL2) {
-            this.#prevCurrentL2 = currentL2!;
-            this.log(`Trigger current L2 changed`, currentL2);
-            this.#triggers.currentChanged.L2.trigger(this, { currentL2 }).catch(
-              console.error,
-            );
-          }
-        });
-    }
-
-    if (currentL3 !== undefined && currentL3 !== null) {
-      this.setCapabilityValue('measure_current.L3', currentL3)
-        .catch(console.error)
-        .finally(() => {
-          this.log("Set 'measure_current.L3' capability to", currentL3);
-          if (currentL3 !== this.#prevCurrentL3) {
-            this.#prevCurrentL3 = currentL3!;
-            this.log(`Trigger current L3 changed`, currentL3);
-            this.#triggers.currentChanged.L3.trigger(this, { currentL3 }).catch(
-              console.error,
-            );
-          }
-        });
-    }
-
-    const consumption = result.data?.liveMeasurement?.accumulatedConsumption;
-    if (consumption && _.isNumber(consumption)) {
-      const fixedConsumption = Number(consumption.toFixed(2));
-      if (fixedConsumption !== this.#prevConsumption) {
-        if (fixedConsumption < this.#prevConsumption!) {
-          // Consumption has been reset
-          this.log('Triggering daily consumption report');
-          this.#triggers.dailyConsumptionReport
-            .trigger(this, {
-              consumption: this.#prevConsumption,
-              cost: this.#prevCost,
-            })
+    await this.setCapabilityValue(`measure_current.${phase}`, current)
+      .catch(console.error)
+      .finally(() => {
+        this.log(`Set 'measure_current.${phase}' capability to`, current);
+        if (current !== this.#prevCurrent[phase]) {
+          this.#prevCurrent[phase] = current!;
+          this.log(`Trigger current ${phase} changed`, current);
+          this.#triggers.currentChanged[phase]
+            .trigger(this, { [`current${phase}`]: current })
             .catch(console.error);
         }
+      });
+  }
 
-        this.#prevConsumption = fixedConsumption;
-        this.setCapabilityValue('meter_power', fixedConsumption).catch(
-          console.error,
-        );
-        this.#triggers.consumptionChanged
-          .trigger(this, { consumption: fixedConsumption })
-          .catch(console.error);
-      }
+  async #handleConsumption(
+    liveMeasurement: LiveMeasurement | undefined,
+  ): Promise<void> {
+    const consumption = liveMeasurement?.accumulatedConsumption;
+    if (consumption === null || consumption === undefined) return;
+
+    const fixedConsumption = Number(consumption.toFixed(2));
+    if (fixedConsumption === this.#prevConsumption) return;
+
+    const promises: Promise<void>[] = [];
+    if (fixedConsumption < this.#prevConsumption) {
+      // Consumption has been reset
+      this.log('Triggering daily consumption report');
+      promises.push(
+        this.#triggers.dailyConsumptionReport
+          .trigger(this, {
+            consumption: this.#prevConsumption,
+            cost: this.#prevCost,
+          })
+          .catch(console.error),
+      );
     }
 
-    let cost = result.data?.liveMeasurement?.accumulatedCost;
+    this.#prevConsumption = fixedConsumption;
+    promises.push(
+      this.setCapabilityValue('meter_power', fixedConsumption)
+        .catch(console.error)
+        .finally(() => {
+          this.#triggers.consumptionChanged
+            .trigger(this, { consumption: fixedConsumption })
+            .catch(console.error);
+        }),
+    );
+
+    await Promise.all(promises);
+  }
+
+  async #handleCost(
+    liveMeasurement: LiveMeasurement | undefined,
+  ): Promise<void> {
+    let cost = liveMeasurement?.accumulatedCost;
+    const consumption = liveMeasurement?.accumulatedConsumption;
+
     if (cost === undefined || cost === null) {
       try {
         const now = moment();
@@ -278,26 +297,26 @@ class PulseDevice extends Device {
           }
         }
 
-        if (_.isNumber(this.#cachedNordPoolPrice?.price))
-          cost = this.#cachedNordPoolPrice!.price * consumption!;
+        if (!_.isNumber(this.#cachedNordPoolPrice?.price)) return;
+        if (consumption === null || consumption === undefined) return;
+
+        cost = this.#cachedNordPoolPrice!.price * consumption!;
       } catch (e) {
         console.error('Error fetching prices from Nord Pool', e);
       }
     }
 
-    if (cost && _.isNumber(cost)) {
-      const fixedCost = Number(cost.toFixed(2));
-      if (fixedCost === this.#prevCost) return;
+    if (cost === null || cost === undefined || !_.isNumber(cost)) return;
+    const fixedCost = Number(cost.toFixed(2));
+    if (fixedCost === this.#prevCost) return;
 
-      this.#prevCost = fixedCost;
-      this.setCapabilityValue('accumulatedCost', fixedCost)
-        .catch(console.error)
-        .finally(() => {
-          this.#triggers.costChanged
-            .trigger(this, { cost: fixedCost })
-            .catch(console.error);
-        });
-    }
+    this.#prevCost = fixedCost;
+    await this.setCapabilityValue('accumulatedCost', fixedCost).catch(
+      console.error,
+    );
+    await this.#triggers.costChanged
+      .trigger(this, { cost: fixedCost })
+      .catch(console.error);
   }
 
   onDeleted() {

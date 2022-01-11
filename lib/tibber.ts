@@ -17,22 +17,24 @@ export interface Logger {
   (message: string, data?: unknown): void;
 }
 
-export interface LiveMeasurement {
+export type LiveMeasurement = {
+  timestamp: string;
+  power: number | null;
+  accumulatedConsumption: number | null;
+  accumulatedCost: number | null;
+  currency: string | null;
+  minPower: number | null;
+  averagePower: number | null;
+  maxPower: number | null;
+  powerProduction: number | null;
+  currentL1: number | null;
+  currentL2: number | null;
+  currentL3: number | null;
+} | null;
+
+export interface LiveMeasurementResponse {
   data?: {
-    liveMeasurement: {
-      timestamp: string;
-      power: number | null;
-      accumulatedConsumption: number | null;
-      accumulatedCost: number | null;
-      currency: string | null;
-      minPower: number | null;
-      averagePower: number | null;
-      maxPower: number | null;
-      powerProduction: number | null;
-      currentL1: number | null;
-      currentL2: number | null;
-      currentL3: number | null;
-    } | null;
+    liveMeasurement: LiveMeasurement;
   };
 }
 
@@ -292,7 +294,9 @@ export class TibberApi {
     );
   }
 
-  subscribeToLive(callback: (result: LiveMeasurement) => Promise<void>) {
+  subscribeToLive(
+    callback: (result: LiveMeasurementResponse) => Promise<void>,
+  ) {
     this.#log('Subscribe to live');
     if (this.#token === undefined) this.#token = this.getDefaultToken();
     if (this.#token === undefined) throw new Error('Access token not set');
